@@ -1,0 +1,24 @@
+{
+  "name": "discord-music-bot",
+  "version": "1.0.0",
+  "description": "Discord music bot with multi-source support",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js"
+  },
+  "keywords": ["discord", "bot", "music"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "@discordjs/voice": "^0.17.0",
+    "@discordjs/opus": "^0.10.0",
+    "ytdl-core": "^4.11.5",
+    "play-dl": "^1.9.7",
+    "sodium-native": "^4.3.0",
+    "ffmpeg-static": "^5.2.0",
+    "dotenv": "^16.4.5"
+  }
+}
