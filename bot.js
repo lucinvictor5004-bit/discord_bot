@@ -5,11 +5,9 @@ import {
   createAudioResource,
   AudioPlayerStatus,
   VoiceConnectionStatus,
-  entersState,
-  VoiceConnection
+  entersState
 } from '@discordjs/voice';
 import play from 'play-dl';
-import ytdl from 'ytdl-core';
 import { config } from 'dotenv';
 
 config();
@@ -23,18 +21,17 @@ const client = new Client({
   ],
 });
 
-// Store active connections and queues per guild
+// Хранилища очередей и плееров для серверов
 const connections = new Map();
 const queues = new Map();
 const players = new Map();
 
 client.once('ready', () => {
-  console.log(`✅ Bot is online as ${client.user.tag}`);
-  console.log(`📊 Serving ${client.guilds.cache.size} servers`);
+  console.log(`✅ Бот успешно запущен как ${client.user.tag}`);
 });
 
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
+  if (message.author.bot || !message.guild) return;
   if (!message.content.startsWith('!')) return;
 
   const args = message.content.slice(1).trim().split(/ +/);
@@ -70,69 +67,43 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-/**
- * ✅ ПРОВЕРЕННЫЙ РАБОТАЮЩИЙ handlePlay:
- * 1. Сначала заходит в голосовой канал
- * 2. Затем загружает трек
- * 3. Кэширует всю информацию
- */
 async function handlePlay(message, args) {
-  if (!message.member.voice.channel) {
-    return message.reply('❌ Вы должны быть в голосовом канале!');
+  const voiceChannel = message.member.voice.channel;
+  if (!voiceChannel) {
+    return message.reply('❌ Сначала зайдите в голосовой канал!');
   }
 
   if (args.length === 0) {
-    return message.reply('❌ Укажите ссылку или название трека!\nПример: `!play https://youtube.com/watch?v=...` или `!play Imagine Dragons - Believer`');
+    return message.reply('❌ Укажите название трека или ссылку! Пример: `!play Imagine Dragons - Believer`');
   }
 
   const query = args.join(' ');
+  const statusMsg = await message.channel.send('🔍 Ищу трек...');
 
-  message.channel.send('🔍 Ищу трек...');
-
-  let stream;
-  let songInfo;
+  let songInfo = null;
 
   try {
-    // --- Определяем тип источника ---
-    if (ytdl.validateURL(query)) {
-      // YouTube URL через ytdl-core
-      const info = await ytdl.getInfo(query, { quality: "highestaudio" });
+    if (query.includes('youtube.com') || query.includes('youtu.be')) {
+      const info = await play.video_info(query);
       songInfo = {
-        title: info.videoDetails.title,
-        url: info.videoDetails.video_url,
-        duration: formatDuration(parseInt(info.videoDetails.lengthSeconds)),
-        thumbnail: info.videoDetails.thumbnails[0]?.url,
+        title: info.video_details.title,
+        url: info.video_details.url,
+        duration: formatDuration(info.video_details.durationInSec),
+        thumbnail: info.video_details.thumbnails[0]?.url,
       };
-      stream = ytdl(query, {
-        filter: 'audioonly',
-        quality: 'highestaudio',
-        highWaterMark: 1 << 25
-      });
-    } else if (query.includes('spotify.com')) {
-      // Spotify через play-dl
-      const spotifyInfo = await play.spotify(query);
-      songInfo = {
-        title: spotifyInfo.name,
-        url: query,
-        duration: formatDuration(spotifyInfo.durationInSec),
-        thumbnail: spotifyInfo.thumbnail?.url,
-      };
-      stream = await play.stream(query);
     } else if (query.includes('soundcloud.com')) {
-      // SoundCloud через play-dl
       const scInfo = await play.soundcloud(query);
       songInfo = {
         title: scInfo.name,
-        url: query,
+        url: scInfo.url,
         duration: formatDuration(scInfo.durationInSec),
         thumbnail: scInfo.thumbnail,
       };
-      stream = await play.stream(query);
     } else {
-      // Поиск на YouTube
-      const searched = await play.search(query, { limit: 1, source: { youtube: "video" } });
-      if (searched.length === 0) {
-        return message.reply('❌ Ничего не найдено!');
+      // Поиск по названию
+      const searched = await play.search(query, { limit: 1 });
+      if (!searched || searched.length === 0) {
+        return statusMsg.edit('❌ Ничего не найдено!');
       }
       const video = searched[0];
       songInfo = {
@@ -141,41 +112,36 @@ async function handlePlay(message, args) {
         duration: formatDuration(video.durationInSec),
         thumbnail: video.thumbnails[0]?.url,
       };
-      stream = await play.stream(video.url);
     }
 
-    // --- ЗАПИСЬ В ОЧЕРЕДЬ ---
     const guildId = message.guild.id;
     if (!queues.has(guildId)) {
       queues.set(guildId, []);
     }
-
     const queue = queues.get(guildId);
     queue.push({ ...songInfo, requester: message.author.tag });
 
-    // --- ЗАХОДИМ В ГОЛОСОВОЙ КАНАЛ ПЕРЕД ВСЁМИ ---
+    // Подключение к каналу
     if (!connections.has(guildId)) {
       const connection = joinVoiceChannel({
-        channelId: message.member.voice.channel.id,
+        channelId: voiceChannel.id,
         guildId: message.guild.id,
         adapterCreator: message.guild.voiceAdapterCreator,
       });
 
-      // Ждём готовности с таймаутом
-      await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
       connections.set(guildId, connection);
 
       const player = createAudioPlayer();
       players.set(guildId, player);
       connection.subscribe(player);
 
-      // Обработчик окончания трека
       player.on(AudioPlayerStatus.Idle, () => {
-        const queue = queues.get(guildId);
-        if (queue && queue.length > 0) {
-          queue.shift(); // Удаляем текущий трек
-          if (queue.length > 0) {
-            playNextSong(guildId, message);
+        const q = queues.get(guildId);
+        if (q && q.length > 0) {
+          q.shift();
+          if (q.length > 0) {
+            playNext(guildId, message);
           } else {
             connection.destroy();
             connections.delete(guildId);
@@ -185,104 +151,66 @@ async function handlePlay(message, args) {
         }
       });
 
-      player.on('error', error => {
-        console.error('Player error:', error);
-        message.channel.send('❌ Ошибка воспроизведения!');
+      player.on('error', (err) => {
+        console.error('Audio Player error:', err);
+        message.channel.send('❌ Ошибка при воспроизведении аудио.');
       });
 
-      // Начинаем воспроизведение
-      await playSong(guildId, stream, message);
+      statusMsg.delete().catch(() => {});
+      await playNext(guildId, message);
     } else {
-      // Трек добавлен в очередь (бот уже в канале)
+      statusMsg.delete().catch(() => {});
       const embed = new EmbedBuilder()
         .setColor('#00ff00')
         .setTitle('➕ Добавлено в очередь')
         .setDescription(`**${songInfo.title}**`)
         .addFields(
-          { name: '⏱️ Длительность', value: songInfo.duration, inline: true },
-          { name: '📝 Позиция', value: `${queue.length}`, inline: true }
+          { name: '⏱️ Длительность', value: songInfo.duration || 'Неизвестно', inline: true },
+          { name: '📝 В очереди', value: `${queue.length}`, inline: true }
         )
-        .setThumbnail(songInfo.thumbnail);
-
+        .setThumbnail(songInfo.thumbnail || null);
       message.channel.send({ embeds: [embed] });
     }
-
-  } catch (error) {
-    console.error('Play error:', error);
-    message.reply(`❌ Не удалось загрузить трек: ${error.message}`);
+  } catch (err) {
+    console.error('Play error:', err);
+    statusMsg.edit(`❌ Не удалось воспроизвести: ${err.message}`);
   }
 }
 
-/**
- * ✅ Запускает воспроизведение песни
- */
-async function playSong(guildId, stream, message) {
+async function playNext(guildId, message) {
+  const queue = queues.get(guildId);
   const player = players.get(guildId);
-  const queue = queues.get(guildId);
+  if (!queue || queue.length === 0 || !player) return;
 
-  if (!queue || queue.length === 0) return;
-
-  const song = queue[0];
-
-  let resource;
-  if (stream.stream) {
-    // play-dl stream
-    resource = createAudioResource(stream.stream, {
-      inputType: stream.type,
-      inlineVolume: true
-    });
-  } else {
-    // ytdl-core stream
-    resource = createAudioResource(stream, {
-      inlineVolume: true
-    });
-  }
-
-  resource.volume?.setVolume(0.5);
-  player.play(resource);
-
-  const embed = new EmbedBuilder()
-    .setColor('#0099ff')
-    .setTitle('🎵 Сейчас играет')
-    .setDescription(`**${song.title}**`)
-    .addFields(
-      { name: '⏱️ Длительность', value: song.duration, inline: true },
-      { name: '👤 Запросил', value: song.requester, inline: true }
-    )
-    .setThumbnail(song.thumbnail)
-    .setFooter({ text: `${queue.length - 1} треков в очереди` });
-
-  message.channel.send({ embeds: [embed] });
-}
-
-/**
- * ✅ Переигрывает следующий трек в очереди
- */
-async function playNextSong(guildId, message) {
-  const queue = queues.get(guildId);
-  if (!queue || queue.length === 0) return;
-
-  const song = queue[0];
+  const current = queue[0];
 
   try {
-    let stream;
-    if (ytdl.validateURL(song.url)) {
-      stream = ytdl(song.url, {
-        filter: 'audioonly',
-        quality: 'highestaudio',
-        highWaterMark: 1 << 25
-      });
-    } else {
-      stream = await play.stream(song.url);
-    }
+    const stream = await play.stream(current.url);
+    const resource = createAudioResource(stream.stream, {
+      inputType: stream.type,
+      inlineVolume: true,
+    });
 
-    await playSong(guildId, stream, message);
+    resource.volume?.setVolume(0.5);
+    player.play(resource);
+
+    const embed = new EmbedBuilder()
+      .setColor('#0099ff')
+      .setTitle('🎵 Сейчас играет')
+      .setDescription(`**${current.title}**`)
+      .addFields(
+        { name: '⏱️ Длительность', value: current.duration || 'Неизвестно', inline: true },
+        { name: '👤 Запросил', value: current.requester, inline: true }
+      )
+      .setThumbnail(current.thumbnail || null);
+
+    message.channel.send({ embeds: [embed] });
   } catch (error) {
-    console.error('Play next error:', error);
-    message.channel.send(`❌ Ошибка при воспроизведении следующего трека`);
+    console.error('Stream error:', error);
+    message.channel.send(`❌ Ошибка загрузки трека: ${current.title}`);
     queue.shift();
     if (queue.length > 0) {
-      playNextSong(guildId, message);
+      playNext(guildId, message);
     }
   }
 }
@@ -290,10 +218,7 @@ async function playNextSong(guildId, message) {
 async function handleStop(message) {
   const guildId = message.guild.id;
   const connection = connections.get(guildId);
-
-  if (!connection) {
-    return message.reply('❌ Бот не в голосовом канале!');
-  }
+  if (!connection) return message.reply('❌ Бот не находится в голосовом канале.');
 
   const player = players.get(guildId);
   if (player) player.stop();
@@ -303,36 +228,28 @@ async function handleStop(message) {
   players.delete(guildId);
   queues.delete(guildId);
 
-  message.reply('⏹️ Воспроизведение остановлено, бот покинул канал');
+  message.reply('⏹️ Воспроизведение остановлено, бот покинул канал.');
 }
 
 async function handleSkip(message) {
-  const guildId = message.guild.id;
-  const player = players.get(guildId);
-
-  if (!player) {
-    return message.reply('❌ Сейчас ничего не играет!');
-  }
-
-  player.stop(); // Это запустит событие Idle, которое воспроизведёт следующий трек
-  message.reply('⏭️ Трек пропущен');
+  const player = players.get(message.guild.id);
+  if (!player) return message.reply('❌ Сейчас ничего не играет!');
+  player.stop();
+  message.reply('⏭️ Трек пропущен.');
 }
 
 async function handleQueue(message) {
-  const guildId = message.guild.id;
-  const queue = queues.get(guildId);
-
-  if (!queue || queue.length === 0) {
-    return message.reply('❌ Очередь пуста!');
-  }
+  const queue = queues.get(message.guild.id);
+  if (!queue || queue.length === 0) return message.reply('❌ Очередь пуста!');
 
   const embed = new EmbedBuilder()
     .setColor('#0099ff')
     .setTitle('📜 Очередь треков')
     .setDescription(
-      queue.map((song, index) =>
-        `${index === 0 ? '▶️' : `${index}.`} **${song.title}** (${song.duration}) - ${song.requester}`
-      ).slice(0, 10).join('\n')
+      queue
+        .map((s, i) => `${i === 0 ? '▶️' : `${i}.`} **${s.title}** (${s.duration || '?'}) — ${s.requester}`)
+        .slice(0, 10)
+        .join('\n')
     )
     .setFooter({ text: `Всего треков: ${queue.length}` });
 
@@ -341,54 +258,37 @@ async function handleQueue(message) {
 
 async function handlePause(message) {
   const player = players.get(message.guild.id);
-
-  if (!player) {
-    return message.reply('❌ Сейчас ничего не играет!');
-  }
-
+  if (!player) return message.reply('❌ Сейчас ничего не играет!');
   player.pause();
-  message.reply('⏸️ Воспроизведение приостановлено');
+  message.reply('⏸️ Пауза.');
 }
 
 async function handleResume(message) {
   const player = players.get(message.guild.id);
-
-  if (!player) {
-    return message.reply('❌ Сейчас ничего не играет!');
-  }
-
+  if (!player) return message.reply('❌ Сейчас ничего не играет!');
   player.unpause();
-  message.reply('▶️ Воспроизведение возобновлено');
+  message.reply('▶️ Возобновлено.');
 }
 
 async function handleHelp(message) {
   const embed = new EmbedBuilder()
     .setColor('#0099ff')
-    .setTitle('🎵 Команды музыкального бота')
-    .setDescription('Список доступных команд:')
+    .setTitle('🎵 Музыкальный бот — Команды')
     .addFields(
-      { name: '!play <ссылка/название>', value: 'Воспроизвести трек из YouTube, Spotify, SoundCloud или по названию' },
-      { name: '!stop', value: 'Остановить воспроизведение и покинуть канал' },
-      { name: '!skip', value: 'Пропустить текущий трек' },
-      { name: '!queue', value: 'Показать очередь треков' },
-      { name: '!pause', value: 'Приостановить воспроизведение' },
-      { name: '!resume', value: 'Возобновить воспроизведение' },
-      { name: '!help', value: 'Показать это сообщение' }
-    )
-    .setFooter({ text: 'Поддерживаются: YouTube, Spotify, SoundCloud' });
-
+      { name: '!play <название / ссылка>', value: 'Включить песню (YouTube, SoundCloud, поиск)' },
+      { name: '!stop', value: 'Остановить и выйти' },
+      { name: '!skip', value: 'Пропустить трек' },
+      { name: '!queue', value: 'Список треков' },
+      { name: '!pause / !resume', value: 'Пауза и продолжение' }
+    );
   message.channel.send({ embeds: [embed] });
 }
 
 function formatDuration(seconds) {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-
-  if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-  }
-  return `${minutes}:${String(secs).padStart(2, '0')}`;
+  if (!seconds || isNaN(seconds)) return '0:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 client.login(process.env.DISCORD_TOKEN);
