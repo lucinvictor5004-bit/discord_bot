@@ -5,20 +5,15 @@
   "main": "bot.js",
   "type": "module",
   "scripts": {
-    "start": "node bot.js",
-    "dev": "node --watch bot.js"
+    "start": "node bot.js"
   },
-  "keywords": ["discord", "bot", "music"],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "discord.js": "^14.16.3",
-    "@discordjs/voice": "^0.17.0",
-    "@discordjs/opus": "^0.10.0",
-    "ytdl-core": "^4.11.5",
+    "@discordjs/voice": "^0.17.1",
     "play-dl": "^1.9.7",
-    "sodium-native": "^4.3.0",
     "ffmpeg-static": "^5.2.0",
+    "tweetnacl": "^1.0.3",
+    "opusscript": "^0.1.1",
     "dotenv": "^16.4.5"
   }
 }
